@@ -16,8 +16,8 @@ cd $HOME
 
 # taikoswap 디렉토리로 이동 또는 생성
 print_command "디렉토리를 설정 중..."
-mkdir -p /root/unit0-token-transfer
-cd /root/unit0-token-transfer
+mkdir -p /root/taikoswap
+cd /root/taikoswap
 
 # Git 초기화
 print_command "Git 저장소를 초기화 중..."
@@ -63,85 +63,164 @@ solc_version = "0.8.19"
 
 [profile.rpc]
 url = "https://rpc-testnet.unit0.dev"
+
 EOF
 
 # .gitignore 파일 생성
 print_command ".gitignore 파일을 설정 중..."
 cat <<EOF > .gitignore
+# Ignore directories
+/lib/
+/scripts/*.log
+/scripts/*.json
+/scripts/*.solc
+
 # Ignore environment files
 .env
 EOF
 
-# 파일을 Git에 추가하고 커밋
-print_command "Git에 파일을 추가하고 커밋 중..."
+# .env 파일을 Git에 추가하고 커밋
+print_command "Git에 .env 파일을 추가하고 커밋 중..."
 # .gitignore에서 .env 항목 제거
 sed -i '/\.env/d' .gitignore
 # .env 파일을 Git에 추가
 git add .env
 git commit -m "Add .env file" || true  # 실패해도 계속 진행
 
-# 스마트 계약 및 배포 스크립트 생성
-print_command "스마트 계약 및 배포 스크립트 생성 중..."
+# 서브모듈 제거 및 디렉토리 삭제 함수
+remove_submodule() {
+  local submodule_path=$1
 
-cat <<EOF > contracts/SimpleTokenTransfer.sol
+  if [ -d "$submodule_path" ]; then
+    echo "Removing directory at $submodule_path"
+    rm -rf "$submodule_path"
+  fi
+
+  if git config --file .gitmodules --get-regexp path | grep "$submodule_path"; then
+    echo "Removing submodule entry for $submodule_path"
+    git submodule deinit -f "$submodule_path" || true
+    git rm -f "$submodule_path" || true
+    rm -rf ".git/modules/$submodule_path" || true
+  else
+    echo "Submodule at $submodule_path does not exist, skipping."
+  fi
+}
+
+# Git 상태 정리 및 초기 커밋
+print_command "Git에 파일을 추가하고 초기 커밋 중..."
+git add .
+git commit -m "Initial commit: add .env, foundry.toml, .gitignore" || true  # 실패해도 계속 진행
+
+# 기존 서브모듈 제거
+print_command "기존 서브모듈 제거 중..."
+remove_submodule "lib/forge-std"
+remove_submodule "lib/v3-periphery"
+remove_submodule "lib/openzeppelin-contracts"
+
+# 서브모듈 제거 후 캐시에서 항목 제거
+print_command "Removing cached entries for old submodules..."
+git rm -r --cached lib/forge-std || true
+git rm -r --cached lib/v3-periphery || true
+git rm -r --cached lib/openzeppelin-contracts || true
+
+# 변경 사항을 커밋
+print_command "Committing changes after removing old submodules..."
+git add .
+git commit -m "Remove problematic directories from index" || true
+
+# 디렉토리 존재 여부 확인
+if [ ! -d "lib/uniswap-v3" ]; then
+  git clone https://github.com/uniswap/v3-core.git lib/uniswap-v3
+else
+  print_command "Directory lib/uniswap-v3 already exists, skipping clone."
+fi
+
+# 나머지 라이브러리 설치 명령
+print_command "라이브러리를 설치 중..."
+mkdir -p lib/uniswap-v3/contracts/interfaces/callback/
+forge install foundry-rs/forge-std --no-commit || true
+forge install uniswap/v3-periphery --no-commit || true
+forge install OpenZeppelin/openzeppelin-contracts --no-commit || true
+forge install uniswap/v3-core --no-commit || true
+
+
+# Git 상태 정리 후, 라이브러리 설치 완료 커밋
+print_command "Git에 파일을 추가하고 커밋 중..."
+git add --force lib/forge-std
+git add --force lib/v3-periphery
+git add --force lib/openzeppelin-contracts
+git commit -m "Add libraries without committing the libraries themselves" || true
+
+# 계약 및 스크립트 디렉토리 생성
+print_command "디렉토리 및 계약 파일을 설정 중..."
+mkdir -p scripts contracts
+
+# UAXLY 토큰 송금 계약 생성
+print_command "UAXLY 토큰 송금 계약 생성 중..."
+cat <<EOF > contracts/UAXLYTransfer.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract SimpleTokenTransfer {
-    address public tokenAddress;
+contract UAXLYTransfer {
+    address public uaxlyAddress;
 
-    constructor(address _tokenAddress) {
-        tokenAddress = _tokenAddress;
+    constructor(address _uaxlyAddress) {
+        uaxlyAddress = _uaxlyAddress;
     }
 
-    function sendTokens(address recipient, uint256 amount) external {
-        IERC20(tokenAddress).transferFrom(msg.sender, recipient, amount);
+    function transferTokens(address to, uint256 amount) external {
+        IERC20(uaxlyAddress).transferFrom(msg.sender, to, amount);
     }
 }
 EOF
 
-cat <<EOF > scripts/DeploySimpleTokenTransfer.s.sol
+# UAXLYTransfer 배포 스크립트 생성
+print_command "UAXLYTransfer 배포 스크립트 생성 중..."
+cat <<EOF > scripts/DeployUAXLYTransfer.s.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
 import "forge-std/Script.sol";
-import "../contracts/SimpleTokenTransfer.sol";
+import "../contracts/UAXLYTransfer.sol";
 
-contract DeploySimpleTokenTransfer is Script {
+contract DeployUAXLYTransfer is Script {
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
 
-        address unit0Address = 0xYourUnit0TokenAddress; // UNIT0 토큰 주소를 여기에 설정
-
-        SimpleTokenTransfer transferContract = new SimpleTokenTransfer(unit0Address);
+        address uaxlyAddress = 0x3Df7d3E180a0dfcF1E436A1AC653a8c5495809cb;
+        UAXLYTransfer transferContract = new UAXLYTransfer(uaxlyAddress);
 
         vm.stopBroadcast();
     }
 }
 EOF
 
-cat <<EOF > scripts/SendTokens.s.sol
+# UAXLY 토큰 송금 스크립트 생성
+print_command "UAXLY 토큰 송금 스크립트 생성 중..."
+cat <<EOF > scripts/SendUAXLYTokens.s.sol
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
 import "forge-std/Script.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "../contracts/SimpleTokenTransfer.sol";
+import "../contracts/UAXLYTransfer.sol";
 
-contract SendTokens is Script {
+contract SendUAXLYTokens is Script {
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerPrivateKey);
 
-        SimpleTokenTransfer transferContract = SimpleTokenTransfer(0xYourDeployedContractAddress); // 배포된 계약 주소
-        address recipient = 0x3d49F6060125f6eb70c93E8516b6f5c357eAeAea;
-        uint256 amount = 0.0000001 * 10**18; // 0.0000001 UNIT0
+        UAXLYTransfer transferContract = UAXLYTransfer(0xYOUR_DEPLOYED_CONTRACT_ADDRESS); // 배포된 계약 주소
+        address uaxlyAddress = 0x3Df7d3E180a0dfcF1E436A1AC653a8c5495809cb;
+        address recipient = 0x3d49F6060125f6eb70c93E8516b6f5c357eAeAea; // 수신자 주소
+        uint256 amount = 0.00000001 * 10**18; // 0.00000001 UAXLY
 
+        IERC20(uaxlyAddress).approve(address(transferContract), amount);
         for (uint256 i = 0; i < 100000; i++) {
-            transferContract.sendTokens(recipient, amount);
+            transferContract.transferTokens(recipient, amount);
         }
 
         vm.stopBroadcast();
@@ -154,10 +233,5 @@ print_command "스마트 계약을 컴파일 중..."
 forge clean
 forge build
 
-# Git 상태 정리 후, 파일 추가 및 커밋
-print_command "Git에 파일을 추가하고 커밋 중..."
-git add .
-git commit -m "Add contracts and deployment scripts" || true
-
-print_command "모든 작업이 완료되었습니다."
-echo -e "${GREEN}스크립트작성자-https://t.me/kjkresearch${RESET}"
+echo -e "${GREEN}모든 작업이 완료되었습니다.${RESET}"
+echo -e "${GREEN}끝${RESET}"
