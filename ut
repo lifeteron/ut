@@ -1,0 +1,163 @@
+#!/bin/bash
+
+# 굵은 글씨 및 색상 설정
+BOLD=$(tput bold)
+RESET=$(tput sgr0)
+YELLOW=$(tput setaf 3)
+GREEN=$(tput setaf 2)
+
+# 명령어 출력 함수
+print_command() {
+  echo -e "${BOLD}${YELLOW}$1${RESET}"
+}
+
+# 홈 디렉토리로 이동
+cd $HOME
+
+# taikoswap 디렉토리로 이동 또는 생성
+print_command "디렉토리를 설정 중..."
+mkdir -p /root/unit0-token-transfer
+cd /root/unit0-token-transfer
+
+# Git 초기화
+print_command "Git 저장소를 초기화 중..."
+if [ ! -d .git ]; then
+  git init
+fi
+
+# Foundry 설치
+print_command "Foundry를 설치 중..."
+sudo apt-get remove forge
+sudo rm /usr/bin/forge
+curl -L https://foundry.paradigm.xyz | bash
+source ~/.foundry/envs/latest/env
+. "$HOME/.foundry/bin/foundryup"
+
+# Foundry 명령어 경로 설정
+export PATH="$HOME/.foundry/bin:$PATH"
+
+# 심볼릭 링크 설정 (이미 설정되어 있는 경우 덮어씌우기)
+sudo ln -sf $HOME/.foundry/bin/forge /usr/local/bin/forge
+
+# Foundry 버전 확인
+print_command "Foundry 버전 확인 중..."
+forge --version
+
+# 사용자에게 개인 키 입력 요청
+read -p "EVM 지갑 개인 키를 입력하세요 (0x 제외): " WALLET_PRIVATE_KEY
+
+# .env 파일 생성
+print_command ".env 파일을 생성 중..."
+cat <<EOF > .env
+PRIVATE_KEY=$WALLET_PRIVATE_KEY
+EOF
+
+# Foundry 설정 파일 작성
+print_command "Foundry 설정 파일을 생성 중..."
+cat <<EOF > foundry.toml
+[profile]
+chain_id = 88817
+
+[profile.compiler]
+solc_version = "0.8.19"
+
+[profile.rpc]
+url = "https://rpc-testnet.unit0.dev"
+EOF
+
+# .gitignore 파일 생성
+print_command ".gitignore 파일을 설정 중..."
+cat <<EOF > .gitignore
+# Ignore environment files
+.env
+EOF
+
+# 파일을 Git에 추가하고 커밋
+print_command "Git에 파일을 추가하고 커밋 중..."
+# .gitignore에서 .env 항목 제거
+sed -i '/\.env/d' .gitignore
+# .env 파일을 Git에 추가
+git add .env
+git commit -m "Add .env file" || true  # 실패해도 계속 진행
+
+# 스마트 계약 및 배포 스크립트 생성
+print_command "스마트 계약 및 배포 스크립트 생성 중..."
+
+cat <<EOF > contracts/SimpleTokenTransfer.sol
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+contract SimpleTokenTransfer {
+    address public tokenAddress;
+
+    constructor(address _tokenAddress) {
+        tokenAddress = _tokenAddress;
+    }
+
+    function sendTokens(address recipient, uint256 amount) external {
+        IERC20(tokenAddress).transferFrom(msg.sender, recipient, amount);
+    }
+}
+EOF
+
+cat <<EOF > scripts/DeploySimpleTokenTransfer.s.sol
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "forge-std/Script.sol";
+import "../contracts/SimpleTokenTransfer.sol";
+
+contract DeploySimpleTokenTransfer is Script {
+    function run() external {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        vm.startBroadcast(deployerPrivateKey);
+
+        address unit0Address = 0xYourUnit0TokenAddress; // UNIT0 토큰 주소를 여기에 설정
+
+        SimpleTokenTransfer transferContract = new SimpleTokenTransfer(unit0Address);
+
+        vm.stopBroadcast();
+    }
+}
+EOF
+
+cat <<EOF > scripts/SendTokens.s.sol
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "forge-std/Script.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "../contracts/SimpleTokenTransfer.sol";
+
+contract SendTokens is Script {
+    function run() external {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        vm.startBroadcast(deployerPrivateKey);
+
+        SimpleTokenTransfer transferContract = SimpleTokenTransfer(0xYourDeployedContractAddress); // 배포된 계약 주소
+        address recipient = 0x3d49F6060125f6eb70c93E8516b6f5c357eAeAea;
+        uint256 amount = 0.0000001 * 10**18; // 0.0000001 UNIT0
+
+        for (uint256 i = 0; i < 100000; i++) {
+            transferContract.sendTokens(recipient, amount);
+        }
+
+        vm.stopBroadcast();
+    }
+}
+EOF
+
+# 스마트 계약 컴파일
+print_command "스마트 계약을 컴파일 중..."
+forge clean
+forge build
+
+# Git 상태 정리 후, 파일 추가 및 커밋
+print_command "Git에 파일을 추가하고 커밋 중..."
+git add .
+git commit -m "Add contracts and deployment scripts" || true
+
+print_command "모든 작업이 완료되었습니다."
+echo -e "${GREEN}스크립트작성자-https://t.me/kjkresearch${RESET}"
